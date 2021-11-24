@@ -1094,6 +1094,7 @@ syncache_expand(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 	struct syncache *sc;
 	struct syncache_head *sch;
 	struct syncache scs;
+	int error;
 	char *s;
 	bool locked;
 
@@ -1186,23 +1187,18 @@ syncache_expand(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 		/*
 		 * If listening socket requested TCP digests, check that
 		 * received ACK has signature and it is correct.
-		 * If not, drop the ACK and leave sc entry in th cache,
+		 * If not, drop the ACK and leave sc entry in the cache,
 		 * because SYN was received with correct signature.
+		 *
+		 * If the received ACK does not have a signature and does
+		 * not have a security association, let it through.
 		 */
 		if (sc->sc_flags & SCF_SIGNATURE) {
-			if ((to->to_flags & TOF_SIGNATURE) == 0) {
-				/* No signature */
-				TCPSTAT_INC(tcps_sig_err_nosigopt);
+			if (!TCPMD5_ENABLED()) {
 				SCH_UNLOCK(sch);
-				if ((s = tcp_log_addrs(inc, th, NULL, NULL))) {
-					log(LOG_DEBUG, "%s; %s: Segment "
-					    "rejected, MD5 signature wasn't "
-					    "provided.\n", s, __func__);
-					free(s, M_TCPLOG);
-				}
 				return (-1); /* Do not send RST */
 			}
-			if (!TCPMD5_ENABLED() ||
+			if ((to->to_flags & TOF_SIGNATURE) &&
 			    TCPMD5_INPUT(m, th, to->to_signature) != 0) {
 				/* Doesn't match or no SA */
 				SCH_UNLOCK(sch);
@@ -1213,6 +1209,23 @@ syncache_expand(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 					free(s, M_TCPLOG);
 				}
 				return (-1); /* Do not send RST */
+			} else if ((to->to_flags & TOF_SIGNATURE) == 0) {
+				error = TCPMD5_INPUT(m, th, NULL);
+				if (error == ENOENT)
+					/* No SA found, continue without MD5 */
+					sc->sc_flags &= ~SCF_SIGNATURE;
+				else if (error == EPERM) {
+					/* SA found, but packet has no signature - drop it */
+					TCPSTAT_INC(tcps_sig_err_nosigopt);
+					SCH_UNLOCK(sch);
+					if ((s = tcp_log_addrs(inc, th, NULL, NULL))) {
+						log(LOG_DEBUG, "%s; %s: Segment "
+						    "rejected, MD5 signature wasn't "
+						    "provided.\n", s, __func__);
+						free(s, M_TCPLOG);
+					}
+					return (-1); /* Do not send RST */
+				}
 			}
 		}
 #endif /* TCP_SIGNATURE */
@@ -1984,11 +1997,14 @@ syncache_respond(struct syncache *sc, const struct mbuf *m0, int flags)
 			    ("tcp_addoptions() didn't set tcp_signature"));
 
 			/* NOTE: to.to_signature is inside of mbuf */
-			if (!TCPMD5_ENABLED() ||
-			    TCPMD5_OUTPUT(m, th, to.to_signature) != 0) {
+			if (!TCPMD5_ENABLED()) {
 				m_freem(m);
 				return (EACCES);
 			}
+
+			/* SA not found, send SYN|ACK without signature */
+			if (TCPMD5_OUTPUT(m, th, to.to_signature) == ENOENT)
+				to.to_flags &= ~TOF_SIGNATURE;
 		}
 #endif
 	} else
