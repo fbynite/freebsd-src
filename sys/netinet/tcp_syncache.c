@@ -1515,15 +1515,11 @@ syncache_add(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 
 #if defined(IPSEC_SUPPORT) || defined(TCP_SIGNATURE)
 	/*
-	 * If listening socket requested TCP digests, check that received
-	 * SYN has signature and it is correct. If signature doesn't match
-	 * or TCP_SIGNATURE support isn't enabled, drop the packet.
+	 * RFC 2385:
+	 * When the received segment has a signature, check it. If the signature
+	 * doesn't match or TCP_SIGNATURE support isn't enabled, drop the packet.
 	 */
-	if (ltflags & TF_SIGNATURE) {
-		if ((to->to_flags & TOF_SIGNATURE) == 0) {
-			TCPSTAT_INC(tcps_sig_err_nosigopt);
-			goto done;
-		}
+	if (to->to_flags & TOF_SIGNATURE) {
 		if (!TCPMD5_ENABLED() ||
 		    TCPMD5_INPUT(m, th, to->to_signature) != 0)
 			goto done;
